@@ -35,16 +35,37 @@ export default function StreamScreen() {
     // is a prop, not a method.
     useEffect(() => {
         const handle: IPlayerHandle = {
-            setProperty: (name, value) => playerRef.current?.setPropertyString(name, value) ?? Promise.resolve(),
+            // Loud on a missing view, unlike the rest. expo-mpv resolves every
+            // ref method to a no-op when the native view is not there, and a
+            // silently skipped property means the stream comes up with mpv's
+            // default buffering: it plays, just seconds behind. Better to fail
+            // the attempt and say so than to ship that quietly.
+            setProperty: (name, value) => {
+                const view = playerRef.current;
+                if (!view) return Promise.reject(new Error(`player not mounted, mpv property ${name} dropped`));
+
+                return view.setPropertyString(name, value);
+            },
             load: url => setSource(url),
-            unload: () => setSource(''),
+            // Both halves matter: the native stop actually stops mpv, and
+            // clearing the prop is what lets the next attempt re-apply the
+            // same url (an unchanged prop is never re-sent).
+            stop: async () => {
+                setSource('');
+                await playerRef.current?.stop();
+            },
             play: () => playerRef.current?.play() ?? Promise.resolve(),
             pause: () => playerRef.current?.pause() ?? Promise.resolve(),
         };
 
         session.attachPlayer(handle);
 
+        // Teardown lives here and not in its own effect: React runs cleanups in
+        // the order the effects were declared, so a separate dispose effect
+        // would always run after the handle had already been dropped, and
+        // would have no player left to stop.
         return () => {
+            session.dispose();
             session.detachPlayer();
         };
     }, [session, setSource]);
@@ -54,13 +75,6 @@ export default function StreamScreen() {
 
         session.start(config);
     }, [session, config, isWiFiConnected]);
-
-    useEffect(
-        () => () => {
-            session.dispose();
-        },
-        [session],
-    );
 
     useEffect(() => {
         const onChange = (state: AppStateStatus) => {

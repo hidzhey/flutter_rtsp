@@ -23,7 +23,14 @@ import { useStreamStore } from '@/store/useStreamStore';
 export interface IPlayerHandle {
     setProperty: (name: string, value: string) => Promise<void>;
     load: (url: string) => void;
-    unload: () => void;
+    /**
+     * Really stops mpv, and clears the source prop with it. Clearing the prop
+     * alone does nothing: expo-mpv's `source` handler ignores a null, so an
+     * empty string never reaches `loadfile` and playback carries on. Clearing
+     * it still matters for the next attempt, because a prop that never changes
+     * value is never re-applied, and retrying the same url would be a no-op.
+     */
+    stop: () => Promise<void>;
     play: () => Promise<void>;
     pause: () => Promise<void>;
 }
@@ -95,6 +102,12 @@ export class StreamSession {
     /** True between `load()` and the first decoded frame. */
     private connecting = false;
 
+    /**
+     * An attempt was cut short by the app going to the background. Resuming
+     * cannot just un-pause, there is nothing to resume, so it starts over.
+     */
+    private interruptedWhileHidden = false;
+
     // eslint-disable-next-line class-methods-use-this
     private log(message: string): void {
         // eslint-disable-next-line no-console
@@ -114,9 +127,26 @@ export class StreamSession {
     // ── Attempts ────────────────────────────────────────────────────────────
 
     async start(config: IStreamConfig): Promise<void> {
-        if (this.isDisposed || this.attemptInProgress) return;
+        if (this.isDisposed) return;
 
+        const previous = this.config;
+        // The newest config wins even mid-attempt: the phone can move between
+        // the two known subnets, and then the device we were dialling is
+        // simply not there any more.
         this.config = config;
+
+        if (this.attemptInProgress) {
+            if (
+                previous &&
+                previous.streamUrl === config.streamUrl &&
+                previous.tcpCommandUrl === config.tcpCommandUrl
+            ) {
+                return;
+            }
+            this.log('config changed mid-attempt, abandoning the old one');
+            this.abandonAttempt();
+        }
+
         this.attemptInProgress = true;
         this.attemptId += 1;
         const attempt = this.attemptId;
@@ -149,7 +179,7 @@ export class StreamSession {
                 if (this.isDisposed || attempt !== this.attemptId) return;
             }
 
-            await this.openPlayer(config);
+            await this.openPlayer(config, attempt);
         } catch (error) {
             this.log(`attempt #${attempt} failed: ${String(error)}`);
             if (attempt === this.attemptId) this.failAttempt();
@@ -176,7 +206,7 @@ export class StreamSession {
 
         // Playback goes first: the device should not still be feeding an RTSP
         // session when it is asked to start a new one.
-        this.player?.unload();
+        await this.player?.stop().catch(() => {});
 
         const hadCommandChannel = this.commandSocket !== null;
         await this.closeCommandSocket();
@@ -213,10 +243,15 @@ export class StreamSession {
                 resolve();
             };
 
+            // Giving up also drops the socket. A connect that lands after we
+            // stopped waiting would write the start command anyway, and then
+            // the device transmits for an attempt that was already written
+            // off, with nothing left to ever close that connection.
             const fail = (error: Error) => {
                 if (settled) return;
                 settled = true;
                 if (ackTimer) clearTimeout(ackTimer);
+                this.closeCommandSocket();
                 reject(error);
             };
 
@@ -246,6 +281,16 @@ export class StreamSession {
                 clearTimeout(connectTimer);
                 fail(error instanceof Error ? error : new Error(String(error)));
             });
+
+            // The device closing this connection is how the stream dies, so it
+            // is worth saying out loud. The watchdog notices three seconds
+            // later anyway, but the log tells you which of the two happened.
+            socket.on('close', () => {
+                if (this.commandSocket === socket) {
+                    this.log('device closed the command channel');
+                    this.commandSocket = null;
+                }
+            });
         });
     }
 
@@ -267,11 +312,24 @@ export class StreamSession {
 
     // ── Player ──────────────────────────────────────────────────────────────
 
-    private async openPlayer(config: IStreamConfig): Promise<void> {
+    private async openPlayer(config: IStreamConfig, attempt: number): Promise<void> {
         const { player } = this;
-        if (!player || this.isDisposed) return;
+        if (!player) {
+            this.log('no player attached, nothing to open');
 
-        player.unload();
+            return;
+        }
+
+        // Every await below is a round trip to the native side, and the
+        // attempt deadline can fire in any of those gaps. Without this check
+        // the abandoned attempt would keep going and write `connecting` and
+        // `load()` on top of the one that replaced it, and the two would then
+        // share one set of frames.
+        const stale = () => this.isDisposed || attempt !== this.attemptId;
+        if (stale()) return;
+
+        await player.stop().catch(() => {});
+        if (stale()) return;
 
         // Properties go on before the file does: mpv reads most of them when
         // it opens the demuxer, and setting them afterwards changes nothing.
@@ -279,6 +337,7 @@ export class StreamSession {
         for (const [name, value] of LOW_LATENCY_PROPERTIES) {
             // eslint-disable-next-line no-await-in-loop
             await player.setProperty(name, value);
+            if (stale()) return;
         }
 
         this.lastPosition = 0;
@@ -286,10 +345,16 @@ export class StreamSession {
         const url = `rtsp://${config.streamUrl}`;
         this.log(`opening ${url}`);
 
-        // Set right before the load: the unload above emits its own stale
+        // Set right before the load: the stop above emits its own stale
         // events, which must not be taken for this attempt.
         this.connecting = true;
         player.load(url);
+
+        // `loadfile` does not clear mpv's pause, and a paused mpv emits no
+        // progress at all, so an app that was backgrounded at the wrong moment
+        // would never report a frame again and every attempt would die on its
+        // deadline. Flutter opened with `play: true` for the same reason.
+        await player.play().catch(() => {});
     }
 
     /**
@@ -350,6 +415,19 @@ export class StreamSession {
      */
     onPlayerError(error: string): void {
         this.log(`player error (not fatal): ${error}`);
+    }
+
+    /**
+     * Drops an attempt without declaring failure: used when something made it
+     * pointless rather than broken, like the config changing underneath it.
+     */
+    private abandonAttempt(): void {
+        this.attemptId += 1;
+        this.attemptInProgress = false;
+        this.connecting = false;
+        this.streamAlive = false;
+        this.clearAttemptDeadline();
+        this.clearStallWatchdog();
     }
 
     private failAttempt(): void {
@@ -424,7 +502,17 @@ export class StreamSession {
 
         this.isHidden = true;
         this.clearStallWatchdog();
-        this.log('hidden: stall watchdog paused');
+
+        // The attempt deadline goes too. Left armed, it would fire while
+        // nobody is watching, mark the attempt failed, and the user would come
+        // back to a dead screen with no way out of it.
+        if (this.attemptInProgress) {
+            this.interruptedWhileHidden = true;
+            this.abandonAttempt();
+            this.log('hidden: attempt in flight abandoned, will start over');
+        } else {
+            this.log('hidden: stall watchdog paused');
+        }
 
         this.player?.pause().catch(() => {});
     }
@@ -436,8 +524,19 @@ export class StreamSession {
         this.isHidden = false;
 
         if (!this.streamAlive) {
-            // An attempt in flight or a failed state owns the screen.
-            this.log('visible: no live stream to resume');
+            // Nothing to resume. Rather than leave a black screen with no way
+            // back, go round again: the attempt we had was either cut short by
+            // the app being hidden or had already failed.
+            const { config } = this;
+            this.interruptedWhileHidden = false;
+            if (!config || !config.streamUrl) {
+                this.log('visible: no device to connect to');
+
+                return;
+            }
+
+            this.log('visible: nothing to resume, starting over');
+            await this.start(config);
 
             return;
         }
@@ -461,8 +560,22 @@ export class StreamSession {
 
         await this.closeCommandSocket();
 
-        this.player?.unload();
+        await this.player?.stop().catch(() => {});
         this.player = null;
+
+        // The whole attempt state goes too, not just the timers. This is a
+        // singleton that outlives the screen, and an attempt that was in flight
+        // when the screen went away leaves `attemptInProgress` set. Both
+        // `start` and `restart` refuse to run while it is, so without this the
+        // next mount would come up to a session that is quietly dead.
+        this.attemptInProgress = false;
+        this.connecting = false;
+        this.streamAlive = false;
+        this.autoRestartUsed = false;
+        this.isHidden = false;
+        this.lastFrameAt = null;
+        this.aliveSince = null;
+        this.lastPosition = 0;
 
         deactivateKeepAwake(KEEP_AWAKE_TAG);
         useStreamStore.getState().setStatus('idle');

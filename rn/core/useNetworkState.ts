@@ -18,16 +18,31 @@ export const useNetworkState = (): void => {
     const [ip, setIp] = useState<string>(EMPTY_IP);
 
     useEffect(() => {
+        // Every network event starts another lookup, and they can come back out
+        // of order. Without the token an older address can land last and leave
+        // the app dialling a device it has already left, or sitting on an empty
+        // one it has already joined.
+        let latest = 0;
+        let cancelled = false;
+
         const read = () => {
+            latest += 1;
+            const ticket = latest;
+
             Network.getIpAddressAsync()
-                .then(setIp)
-                .catch(() => setIp(EMPTY_IP));
+                .then(address => {
+                    if (!cancelled && ticket === latest) setIp(address);
+                })
+                .catch(() => {
+                    if (!cancelled && ticket === latest) setIp(EMPTY_IP);
+                });
         };
 
         read();
         const unsubscribe = NetInfo.addEventListener(read);
 
         return () => {
+            cancelled = true;
             unsubscribe();
         };
     }, []);
