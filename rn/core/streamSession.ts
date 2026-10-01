@@ -30,8 +30,14 @@ export interface IPlayerHandle {
 
 const KEEP_AWAKE_TAG = 'archer-link-stream';
 
-/** Connection diagnostics. Noisy, so it is off unless a reconnect misbehaves. */
-const CONN_DIAG = __DEV__;
+/**
+ * Connection diagnostics: attempts, acks, stalls and restarts. On in a dev
+ * build, and in a release one when it is built with
+ * `EXPO_PUBLIC_CONN_DIAG=true`, so a phone that shows a black screen can still
+ * be read with `adb logcat -s ReactNativeJS`. The Flutter app gates the same
+ * logs behind `--dart-define=CONN_DIAG`.
+ */
+const CONN_DIAG = __DEV__ || process.env.EXPO_PUBLIC_CONN_DIAG === 'true';
 
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 

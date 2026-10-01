@@ -73,6 +73,24 @@ EXPO_PUBLIC_STREAM_URL=10.0.2.2:8555/stream0 EXPO_PUBLIC_TCP_COMMAND_URL=10.0.2.
 вважала спробу провальною і не вмикала сторож. Тепер «живий» означає рух
 позиції відтворення, як і в флаттер-апці, де для цього слухали `width`.
 
+## Діагностика
+
+У релізі логи вимкнені. Щоб зібрати з ними:
+
+```bash
+EXPO_PUBLIC_CONN_DIAG=true npm run android
+```
+
+Далі `adb logcat -s ReactNativeJS` і видно, на чому стало: командний сокет, ack,
+перший кадр чи сторож підвисання. Наприклад:
+
+```
+[CONN] attempt #1 started
+[CONN] attempt #1 failed: ECONNREFUSED (port 8888)
+```
+
+Той самий прапорець у флаттер-апці зветься `--dart-define=CONN_DIAG`.
+
 ## Відкриті питання
 
 - `expo-mpv` вимагає **iOS 16.4**, а флаттер-апка зараз на 15.0 і BC2 на 15.5.
