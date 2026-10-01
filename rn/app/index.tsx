@@ -3,6 +3,7 @@ import { AppState, AppStateStatus, StyleSheet } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { ExpoMpvView, ExpoMpvViewRef } from 'expo-mpv';
 import styled from 'styled-components/native';
+import { ServerWorker } from '@/core/serverWorker';
 import { IPlayerHandle, StreamSession } from '@/core/streamSession';
 import { useNetworkState } from '@/core/useNetworkState';
 import { useStreamStore } from '@/store/useStreamStore';
@@ -13,17 +14,18 @@ const Screen = styled.View`
 `;
 
 /**
- * The stream, and nothing else.
+ * The stream, and nothing else on top of it.
  *
  * Deliberately bare: the point of this screen is to prove that the picture
- * arrives and keeps arriving. Buttons, recording and the device commands come
- * after that holds on real hardware.
+ * arrives and keeps arriving. The command channel runs underneath it with no
+ * controls wired to it yet, so the device status is read but nothing is sent.
  */
 export default function StreamScreen() {
     useNetworkState();
 
     const playerRef = useRef<ExpoMpvViewRef>(null);
     const session = useMemo(() => StreamSession.getInstance(), []);
+    const worker = useMemo(() => ServerWorker.getInstance(), []);
 
     const config = useStreamStore(state => state.config);
     const isWiFiConnected = useStreamStore(state => state.isWiFiConnected);
@@ -75,6 +77,19 @@ export default function StreamScreen() {
 
         session.start(config);
     }, [session, config, isWiFiConnected]);
+
+    // The command channel is its own connection and its own lifetime: it keeps
+    // retrying on its own, so it is started once the device is known and only
+    // stopped when the screen goes away.
+    useEffect(() => {
+        if (!isWiFiConnected || !config.commandUrl) return undefined;
+
+        worker.start(config.commandUrl);
+
+        return () => {
+            worker.stop();
+        };
+    }, [worker, config, isWiFiConnected]);
 
     useEffect(() => {
         const onChange = (state: AppStateStatus) => {
