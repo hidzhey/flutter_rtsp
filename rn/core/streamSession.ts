@@ -286,9 +286,14 @@ export class StreamSession {
         player.load(url);
     }
 
-    /** First decoded frame. The real "stream is up" signal. */
-    onFirstFrame(width: number): void {
-        if (!this.connecting || width <= 0) return;
+    /**
+     * The stream is up. Not the same thing as "the file opened": mpv reports
+     * `file-loaded` as soon as the demuxer is ready, with the video size still
+     * unknown, and it will happily sit on an RTSP url that never sends a frame.
+     * So this is only called once something actually decoded.
+     */
+    private markAlive(): void {
+        if (!this.connecting) return;
 
         this.connecting = false;
         this.attemptInProgress = false;
@@ -311,14 +316,25 @@ export class StreamSession {
     }
 
     /**
+     * File opened. Carries the video size, which on a live stream is usually
+     * still zero here, so it only counts when mpv already knows it.
+     */
+    onLoad(width: number): void {
+        if (width > 0) this.markAlive();
+    }
+
+    /**
      * The liveness signal: position moves while frames are being decoded and
-     * freezes the moment they stop.
+     * freezes the moment they stop. It is also what tells us the stream came
+     * up at all, because it is the first thing that can only happen after a
+     * frame was decoded.
      */
     onProgress(position: number): void {
         if (position === this.lastPosition) return;
 
         this.lastPosition = position;
         this.lastFrameAt = Date.now();
+        this.markAlive();
     }
 
     /**

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import NetInfo from '@react-native-community/netinfo';
 import * as Network from 'expo-network';
-import { EMPTY_STREAM_CONFIG, STREAM_CONFIG_BY_SUBNET } from '@/constant/stream';
+import { DEV_STREAM_CONFIG, EMPTY_STREAM_CONFIG, STREAM_CONFIG_BY_SUBNET } from '@/constant/stream';
 import { useStreamStore } from '@/store/useStreamStore';
 
 const EMPTY_IP = '0.0.0.0';
@@ -33,6 +33,15 @@ export const useNetworkState = (): void => {
     }, []);
 
     useEffect(() => {
+        // A test server is reached over whatever network the machine is on, so
+        // the subnet says nothing about it. When one is configured, it wins.
+        if (DEV_STREAM_CONFIG) {
+            setIsWiFiConnected(true);
+            setConfig(DEV_STREAM_CONFIG);
+
+            return;
+        }
+
         const octets = ip.split('.');
         if (ip === EMPTY_IP || octets.length < 3) {
             setIsWiFiConnected(false);

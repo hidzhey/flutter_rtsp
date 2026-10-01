@@ -20,6 +20,24 @@ export const STREAM_CONFIG_BY_SUBNET: Record<string, IStreamConfig> = {
     },
 };
 
+/**
+ * Dev override: point the app at a test RTSP server instead of a device.
+ *
+ * Set `EXPO_PUBLIC_STREAM_URL` (and optionally `EXPO_PUBLIC_TCP_COMMAND_URL`)
+ * before starting the bundler, e.g. `10.0.2.2:8555/stream0` for a server on
+ * the machine running an emulator. Unset in any real build, and the subnet
+ * table below is what decides then. The Flutter app keeps a commented-out
+ * block in `main.dart` for exactly this.
+ */
+export const DEV_STREAM_CONFIG: IStreamConfig | null = process.env.EXPO_PUBLIC_STREAM_URL
+    ? {
+          streamUrl: process.env.EXPO_PUBLIC_STREAM_URL,
+          commandUrl: process.env.EXPO_PUBLIC_COMMAND_URL ?? '',
+          tcpCommandUrl: process.env.EXPO_PUBLIC_TCP_COMMAND_URL ?? '',
+          shouldRunStreamView: !!process.env.EXPO_PUBLIC_TCP_COMMAND_URL,
+      }
+    : null;
+
 export const EMPTY_STREAM_CONFIG: IStreamConfig = {
     streamUrl: '',
     commandUrl: '',

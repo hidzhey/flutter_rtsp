@@ -81,7 +81,7 @@ export default function StreamScreen() {
 
     const onLoad = useCallback(
         (event: { nativeEvent: { width: number } }) => {
-            session.onFirstFrame(event.nativeEvent.width);
+            session.onLoad(event.nativeEvent.width);
         },
         [session],
     );
